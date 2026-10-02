@@ -1556,6 +1556,224 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
   pass "forge=gerrit: direct-PR publishes one squashed change and a stack is refused with its reason"
 }
 
+# The publisher binds from its own token, is reported only through --publish,
+# and is refused where it cannot compose: a mode with no pipeline to run, a
+# forge whose review pass already publishes, or a value outside the closed set.
+test_project_mode_binds_the_publisher() {
+  local home out err status label registry expect publish
+  home="$TMP_ROOT/publish-binding/home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label registry expect publish; do
+    [ -n "$label" ] || continue
+    printf '%s\n' "$registry" > "$home/data/projects.md"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
+    [ "$out" = "$expect" ] || fail "$label: expected default output '$expect', got '$out'"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --publish fp 2>/dev/null)
+    [ "$out" = "$publish" ] || fail "$label: expected --publish '$publish', got '$out'"
+  done <<'ROWS'
+no annotation at all|- fp - fixture (added 2026-01-01)|no-mistakes off|fleet
+captain beside no-mistakes|- fp [no-mistakes publish=captain] - fixture (added 2026-01-01)|no-mistakes off|captain
+captain keeps yolo for the PR the captain opens|- fp [no-mistakes +yolo publish=captain] - fixture (added 2026-01-01)|no-mistakes on|captain
+captain under the conditional policy|- fp [publish=captain no-mistakes-prod-only] - fixture (added 2026-01-01)|no-mistakes off|captain
+an explicit fleet publisher|- fp [direct-PR publish=fleet] - fixture (added 2026-01-01)|direct-PR off|fleet
+an unregistered project|- other [no-mistakes publish=captain] - fixture (added 2026-01-01)|no-mistakes off|fleet
+ROWS
+
+  while IFS='|' read -r label registry expect; do
+    [ -n "$label" ] || continue
+    printf '%s\n' "$registry" > "$home/data/projects.md"
+    for flag in "" --publish --forge; do
+      # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+      out=$(FM_HOME="$home" "$PROJECT_MODE" $flag fp 2>/dev/null)
+      status=$?
+      [ "$status" -eq 3 ] || fail "$label did not refuse${flag:+ under $flag} (status $status, got '$out')"
+      [ -z "$out" ] || fail "$label still handed the caller a posture: '$out'"
+    done
+    err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null) || true
+    assert_contains "$err" "$expect" "$label: the refusal did not say why"
+  done <<'ROWS'
+captain on direct-PR|- fp [direct-PR publish=captain] - fixture (added 2026-01-01)|register no-mistakes or no-mistakes-prod-only
+captain on local-only|- fp [local-only publish=captain] - fixture (added 2026-01-01)|register no-mistakes or no-mistakes-prod-only
+captain beside a Gerrit forge|- fp [no-mistakes forge=gerrit publish=captain] - fixture (added 2026-01-01)|already defines how its change is published
+an unknown publisher|- fp [no-mistakes publish=me] - fixture (added 2026-01-01)|unknown publisher "me"
+an empty publisher|- fp [no-mistakes publish=] - fixture (added 2026-01-01)|unknown publisher ""
+ROWS
+
+  # A misspelled key keeps the old tolerance, so it must at least warn: silently
+  # reading it as the fleet publisher is how a worker would push a captain's work.
+  printf '%s\n' '- fp [no-mistakes publsh=captain] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --publish fp 2>/dev/null)
+  [ "$out" = fleet ] || fail "a near-miss publisher key changed the binding (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
+  assert_contains "$err" 'publish=captain' "the near-miss warning did not name the publish=captain spelling"
+  pass "fm-project-mode: the publisher binds from its own token and is reported only through --publish"
+}
+
+# publish=captain changes what no-mistakes means for the worker the same way a
+# Gerrit forge does - forge steps skipped, fixes recovered onto the branch - but
+# it ends at a ready local branch with nothing published at all.
+test_publish_captain_ends_no_mistakes_at_a_ready_branch() {
+  local home brief out status
+  home="$TMP_ROOT/publish-dod/home"
+  mkdir -p "$home/data" "$home/state"
+  out=$(FM_HOME="$home" "$BRIEF" publish-dod-c1 work-project --mode no-mistakes --publish captain) \
+    || fail "a captain-published no-mistakes brief should scaffold"
+  assert_contains "$out" "publish=captain" "the scaffold summary did not name the publisher"
+  brief="$home/data/publish-dod-c1/brief.md"
+  grep -qx "Delivery contract: mode=no-mistakes publish=captain" "$brief" \
+    || fail "the brief did not record the machine-readable publisher in its delivery contract"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep '1. Never push to any remote, never open a PR, and never merge. Work only on your `fm/publish-dod-c1` branch' "$brief" \
+    "rule one did not keep the worker off every remote"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'Pass `--skip push,pr,ci` on every `no-mistakes axi run` for this task' "$brief" \
+    "the worker was not given the skip vocabulary that keeps the pipeline from publishing"
+  assert_grep 'skip nothing else' "$brief" "nothing stopped the worker skipping the review itself"
+  assert_grep 'no-mistakes axi sync --recover' "$brief" "the worker was not given the recovery command"
+  assert_grep 'You may not report ready until you have closed that gap' "$brief" \
+    "custody recovery was not required before the ready report"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'Confirm with `git log` that `fm/publish-dod-c1` now carries every fix commit the run made' "$brief" \
+    "the worker was not told to confirm every fix commit is on its branch"
+  assert_grep 'note [at=<epoch>]: pipeline changes: {finding} - {fix it made}' "$brief" \
+    "the worker was not told to report what the pipeline changed"
+  assert_grep 'done [at=<epoch>]: validated ready in branch fm/publish-dod-c1' "$brief" \
+    "the contract did not end at a validated ready local branch"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'Run `no-mistakes doctor`' "$brief" "the worker lost the pipeline initialization step"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'NEVER pass `--yes` (or `-y`)' "$brief" "the worker lost the --yes ban"
+  assert_no_grep 'checks green' "$brief" "the worker was still told to report a PR with green checks"
+  assert_no_grep 'checks-passed' "$brief" "the worker was told to wait for a ci return its skipped step never gives"
+  assert_no_grep 'gerrit-axi' "$brief" "the worker was given the Gerrit publish step"
+  assert_no_grep 'gh-axi pr ready' "$brief" "the worker was given a pull request to mark ready"
+
+  # Only a no-mistakes ship on a forge the captain opens PRs on can carry it.
+  for args in "--mode direct-PR --publish captain|cannot ship mode=direct-PR" \
+    "--mode local-only --publish captain|cannot ship mode=local-only" \
+    "--mode no-mistakes --forge gerrit --publish captain|cannot ship forge=gerrit" \
+    "--mode no-mistakes --publish someone|unknown publisher" \
+    "--scout --publish captain|--publish applies only to ship briefs"; do
+    # shellcheck disable=SC2086 # The flag list is split deliberately.
+    out=$(FM_HOME="$home" "$BRIEF" publish-dod-bad work-project ${args%%|*} 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "fm-brief accepted ${args%%|*}"
+    assert_contains "$out" "${args#*|}" "the refusal of ${args%%|*} did not say why"
+    assert_absent "$home/data/publish-dod-bad/brief.md" "a refused publisher still wrote a brief"
+  done
+  pass "publish=captain: no-mistakes runs as a review pass that ends at a validated ready local branch"
+}
+
+# On a publish=captain project the captain pushes and opens every PR, so the
+# spawn refuses a ship whose brief would let the worker or the pipeline publish,
+# while a captain-published brief and a local-only task launch normally.
+test_spawn_holds_a_captain_published_project_to_its_publisher() {
+  local rec home proj fakebin out status
+  rec=$(make_home publish-agree "- proj [no-mistakes publish=captain] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  FM_HOME="$home" "$BRIEF" publish-agree-a1 proj --mode no-mistakes >/dev/null \
+    || fail "a fleet-published brief should scaffold"
+  fill_brief_subsections "$home/data/publish-agree-a1/brief.md" "Validate it." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" publish-agree-a1 "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a captain-published project launched a brief whose pipeline pushes"
+  assert_contains "$out" "publish mismatch for publish-agree-a1" "the refusal did not name the drift it caught"
+  assert_contains "$out" "fm-brief.sh publish-agree-a1 proj --mode no-mistakes --publish captain" \
+    "the refusal did not print a re-scaffold command that can actually run"
+  assert_contains "$out" "Captain's intent" "the refusal did not say to preserve the filled subsections"
+  assert_absent "$home/state/publish-agree-a1.meta" "the refused spawn still recorded a task"
+
+  FM_HOME="$home" "$BRIEF" publish-agree-a2 proj --mode direct-PR >/dev/null \
+    || fail "a direct-PR brief should scaffold"
+  fill_brief_subsections "$home/data/publish-agree-a2/brief.md" "Open a PR." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" publish-agree-a2 "$proj" claude --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a captain-published project launched a direct-PR worker that pushes"
+  assert_contains "$out" "mode=direct-PR would have the worker push" "the direct-PR refusal did not say why"
+  assert_absent "$home/state/publish-agree-a2.meta" "the refused direct-PR spawn still recorded a task"
+
+  FM_HOME="$home" "$BRIEF" publish-agree-a3 proj --mode no-mistakes --publish captain >/dev/null \
+    || fail "a captain-published brief should scaffold"
+  fill_brief_subsections "$home/data/publish-agree-a3/brief.md" "Validate it." "Stop at a ready branch."
+  out=$(run_spawn "$home" "$fakebin" publish-agree-a3 "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  assert_not_contains "$out" "publish mismatch" "an agreeing brief and registry were reported as drift"
+  assert_not_contains "$out" "delivery mismatch" "the captain-published brief lost its mode agreement"
+
+  FM_HOME="$home" "$BRIEF" publish-agree-a4 proj --mode local-only >/dev/null \
+    || fail "a local-only brief should scaffold"
+  fill_brief_subsections "$home/data/publish-agree-a4/brief.md" "Land it locally." "Stop at a ready branch."
+  out=$(run_spawn "$home" "$fakebin" publish-agree-a4 "$proj" claude --mode local-only --yolo off 2>&1)
+  assert_not_contains "$out" "publish mismatch" "local-only, which pushes nothing, was refused"
+
+  # A captain-published brief on a fleet-published project only publishes less.
+  rec=$(make_home publish-agree-fleet "- proj [no-mistakes] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  FM_HOME="$home" "$BRIEF" publish-agree-a5 proj --mode no-mistakes --publish captain >/dev/null \
+    || fail "a captain-published brief should scaffold"
+  fill_brief_subsections "$home/data/publish-agree-a5/brief.md" "Validate it." "Stop at a ready branch."
+  out=$(run_spawn "$home" "$fakebin" publish-agree-a5 "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  assert_not_contains "$out" "publish mismatch" "a per-task captain publisher was refused on a fleet project"
+  pass "fm-spawn: a publish=captain project never launches a worker or pipeline that publishes"
+}
+
+# Promotion takes the publisher from the registry as it takes the forge, so a
+# promoted worker on a captain-published project gets the same ready-branch
+# contract as a briefed one, and a direct-PR promotion is refused there.
+test_promotion_carries_the_publisher_binding() {
+  local home sendroot meta out payload id status
+  home="$TMP_ROOT/publish-promote/home"
+  sendroot="$TMP_ROOT/publish-promote/sendroot"
+  mkdir -p "$home/state" "$home/data" "$home/projects/proj" "$sendroot/bin"
+  printf '%s\n' '- proj [no-mistakes publish=captain] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "$2" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
+
+  for id in publish-promote-c1 publish-promote-c2; do
+    meta="$home/state/$id.meta"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$home/projects/proj" > "$meta"
+    FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+      || fail "scout brief generation should succeed"
+    fill_brief_subsections "$home/data/$id/brief.md" \
+      "Fix what the investigation found on the work project." "Carry over only the fix."
+  done
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" publish-promote-c2 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a direct-PR promotion was accepted on a captain-published project"
+  assert_contains "$out" "registered publish=captain" "the direct-PR promotion refusal did not say why"
+  grep -qx 'kind=scout' "$home/state/publish-promote-c2.meta" || fail "a refused promotion still flipped the task"
+
+  id="publish-promote-c1"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1) \
+    || fail "promotion should take the registered publisher with no flag to remember"
+  assert_contains "$out" "publish=captain" "the promotion summary did not name the publisher"
+  payload="$TMP_ROOT/publish-promote/payload"
+  ( cd "$sendroot" \
+    && FM_TEST_CAPTURE="$payload" \
+       eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+    || fail "promotion's delivery command did not run"
+  grep -qx "Delivery contract: mode=no-mistakes publish=captain" "$payload" \
+    || fail "the promoted worker did not receive the publisher in its delivery contract"
+  assert_grep 'Never push to any remote, never open a PR, and never merge' "$payload" \
+    "the promoted worker was not kept off every remote"
+
+  rm "$home/data/$id/brief.md"
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes --publish captain >/dev/null 2>&1 \
+    || fail "ordinary captain-published ship brief generation should succeed"
+  awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$TMP_ROOT/publish-promote/brief-dod"
+  awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$TMP_ROOT/publish-promote/delivered-dod"
+  cmp -s "$TMP_ROOT/publish-promote/brief-dod" "$TMP_ROOT/publish-promote/delivered-dod" \
+    || fail "promotion and ordinary brief generation delivered different captain-published contracts"
+  pass "fm-promote: a promoted worker receives the project's registered publisher with no flag to remember"
+}
+
 test_authorized_intent_keeps_words_without_composed_address
 test_spawn_refreshes_legacy_worker_roles
 
@@ -1637,4 +1855,8 @@ test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_spawn_and_promote_require_filled_task_subsections
 test_project_mode_resolves_branch_prefix
+test_project_mode_binds_the_publisher
+test_publish_captain_ends_no_mistakes_at_a_ready_branch
+test_spawn_holds_a_captain_published_project_to_its_publisher
+test_promotion_carries_the_publisher_binding
 echo "# all fm-task-delivery tests passed"

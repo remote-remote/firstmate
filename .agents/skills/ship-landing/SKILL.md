@@ -13,8 +13,14 @@ Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signa
 `bin/fm-dod-lib.sh` owns the named-head gate on that ready signal: a ship `done:` whose named head exists only in the worker's disposable copy is not ready (`bin/fm-crew-state.sh` reports blocked, `bin/fm-pr-check.sh` refuses to register, and a secondmate does not publish that done upstream).
 That blocked reading is the gate working, not a stuck worker, so steer the worker on the commit the refusal names rather than waiting.
 A direct-PR worker pushes that commit to its PR branch, and a local-only worker commits it on its ship branch.
-A no-mistakes worker re-validates it with /no-mistakes so the pipeline stays the one publisher; it never pushes from its copy.
+A no-mistakes worker re-validates it with /no-mistakes so the pipeline stays the one publisher; it never pushes from its copy, and on a `publish=captain` project it recovers the pipeline's fixes onto its branch instead.
 In no-mistakes mode the earlier `done [at=<epoch>]: {summary}` is the pipeline handoff and is not gated.
+
+On a `publish=captain` project a no-mistakes ship instead ends with a `pipeline changes` note and `done [at=<epoch>]: validated ready in branch <branch>`, and `bin/fm-crew-state.sh` reads it blocked until the pipeline's fixes are on that branch.
+Tell the captain the branch name, a concise outcome summary, and what the pipeline changed, then wait for the captain to push it and open the PR.
+Never push that branch, open a PR for it, or merge it into local main; `bin/fm-merge-local.sh` refuses it because the task is not local-only.
+When the captain names the PR, run `bin/fm-pr-check.sh <id> <PR url>` with that URL and land it like any other PR under the configured merge authority.
+
 Tell the captain the PR's full `https://...` URL copied from the worker's ready line, the resolved checks-green crew-state line, or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.

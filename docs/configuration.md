@@ -12,6 +12,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Who pushes a project's work | [Captain-published delivery](#captain-published-delivery-dataprojectsmd-publishcaptain) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -127,6 +128,20 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md).
 Edit it like any prompt when the fleet is empty.
 While tasks are in flight, dispatch shared-repo edits to a crewmate.
+
+## Captain-published delivery (data/projects.md publish=captain)
+
+Register `publish=captain` on a project's `data/projects.md` entry when the captain must be the one who pushes its work and opens its pull requests, such as a work repository.
+The [`bin/fm-project-mode.sh` header](../bin/fm-project-mode.sh) owns the token's syntax and the postures it composes with: `no-mistakes` or `no-mistakes-prod-only`, with no `forge=` binding.
+
+On such a project every no-mistakes ship runs the pipeline as a review pass with its push, PR, and CI steps skipped.
+The worker brings the pipeline's fix commits back onto its branch and reports a ready local branch with a note listing what the pipeline changed; nothing is pushed and no PR is opened.
+[`bin/fm-dod-lib.sh`](../bin/fm-dod-lib.sh) owns that worker contract and the gate that refuses the ready report while the pipeline's fixes are missing from the branch.
+Firstmate reports the branch to the captain and never pushes it, opens a PR for it, or merges it into the local default branch.
+After the captain pushes the branch and opens the PR, firstmate tracks that PR to merge under the project's normal merge authority, including `+yolo` when registered; the `ship-landing` skill owns that handoff.
+
+`bin/fm-brief.sh --publish captain` scaffolds the brief, and `bin/fm-spawn.sh` and `bin/fm-promote.sh` refuse a no-mistakes or direct-PR ship on the project that would let the worker or the pipeline publish.
+A `local-only` task, which pushes nothing, is still available on the project.
 
 ## Calm preference (config/calm)
 

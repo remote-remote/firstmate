@@ -382,6 +382,97 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+
+# A fake no-mistakes on PATH answering only `axi status` from the worker copy:
+# a run object, then its branch_sync block. By default the run's result is the
+# copy's own passed HEAD with custody returned; a case overrides the outcome,
+# the pipeline head, the next action, or makes the read fail.
+install_fake_nm() {  # <bindir>
+  mkdir -p "$1"
+  cat > "$1/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-}" = "axi status" ] || exit 2
+[ "${FM_TEST_NM_FAIL:-0}" = 0 ] || exit 1
+head=$(git rev-parse HEAD 2>/dev/null) || exit 1
+pipeline=${FM_TEST_NM_PIPELINE_HEAD:-$head}
+printf 'run:\n  id: "RUNFIXTURE"\n  branch: fm/task\n  status: completed\n  head_sha: %s\noutcome: %s\n' \
+  "$pipeline" "${FM_TEST_NM_OUTCOME-passed}"
+printf 'branch_sync:\n  state: synchronized\n  local:\n    head: %s\n  pipeline:\n    current_head: %s\n' "$head" "$pipeline"
+if [ -n "${FM_TEST_NM_NEXT_ACTION:-}" ]; then
+  printf '  next_action:\n    code: %s\n    command: no-mistakes axi status\n' "$FM_TEST_NM_NEXT_ACTION"
+fi
+SH
+  chmod +x "$1/no-mistakes"
+}
+
+# A publish=captain ready report names a local branch, and push is skipped, so
+# the pipeline's fix commits stay in its gate until the worker recovers custody.
+# The report is refused while the run holds the branch, while HEAD is not the
+# run's result, while the run is unreadable or not passing, and while the head
+# lives only in the disposable copy; it is accepted once the recovered head is
+# on the shared local branch.
+test_captain_published_ready_branch_requires_recovered_fixes() {
+  local repo wt elsewhere fixed line reason rc fakebin
+  repo="$TMP_ROOT/captain-repo"
+  wt="$TMP_ROOT/captain-wt"
+  fakebin="$TMP_ROOT/captain-bin"
+  install_fake_nm "$fakebin"
+  fm_git_worktree "$repo" "$wt" fm/captain
+  printf 'flawed\n' > "$wt/doc"
+  git -C "$wt" add doc
+  git -C "$wt" commit -q -m 'Document the value'
+  elsewhere="$TMP_ROOT/captain-gate"
+  git clone -q "$wt" "$elsewhere"
+  git -C "$elsewhere" checkout -q fm/captain
+  printf 'fixed\n' > "$elsewhere/doc"
+  git -C "$elsewhere" commit -q -am 'no-mistakes(review): Correct the documented value'
+  fixed=$(git -C "$elsewhere" rev-parse HEAD)
+  line='done: validated ready in branch fm/captain'
+
+  rc=0
+  reason=$(PATH="$fakebin:$PATH" FM_TEST_NM_PIPELINE_HEAD=$fixed FM_TEST_NM_NEXT_ACTION=recover_custody \
+    accept_done ship no-mistakes "$wt" "$repo" "$line") || rc=$?
+  [ "$rc" -eq 1 ] || fail "a ready branch was accepted while the run still held its fixes"
+  assert_contains "$reason" "still holds this copy's branch" "the refusal did not say the run holds the branch"
+
+  rc=0
+  reason=$(PATH="$fakebin:$PATH" FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    accept_done ship no-mistakes "$wt" "$repo" "$line") || rc=$?
+  [ "$rc" -eq 1 ] || fail "a ready branch was accepted although HEAD is not the run's result"
+  assert_contains "$reason" "does not carry the no-mistakes run's result" "the refusal did not name the missing result"
+
+  rc=0
+  reason=$(PATH="$fakebin:$PATH" FM_TEST_NM_FAIL=1 accept_done ship no-mistakes "$wt" "$repo" "$line") || rc=$?
+  [ "$rc" -eq 1 ] || fail "a ready branch was accepted although its run could not be read"
+  assert_contains "$reason" "could not be read" "the refusal did not say the run was unreadable"
+
+  rc=0
+  reason=$(PATH="$fakebin:$PATH" FM_TEST_NM_OUTCOME=failed accept_done ship no-mistakes "$wt" "$repo" "$line") || rc=$?
+  [ "$rc" -eq 1 ] || fail "a ready branch was accepted after a failed run"
+  assert_contains "$reason" "not a pass" "the refusal did not say the run did not pass"
+
+  # Recovering custody brings the fix commit onto the branch.
+  git -C "$wt" fetch -q "$elsewhere" fm/captain
+  git -C "$wt" merge -q --ff-only FETCH_HEAD
+  PATH="$fakebin:$PATH" FM_TEST_NM_PIPELINE_HEAD=$fixed accept_done ship no-mistakes "$wt" "$repo" "$line" \
+    || fail "a recovered ready branch on the shared local branch was refused"
+  PATH="$fakebin:$PATH" FM_TEST_NM_OUTCOME=passed-with-skips accept_done ship no-mistakes "$wt" "$repo" "$line" \
+    || fail "a skipped-publication pass, the outcome this review pass produces, was refused"
+
+  # The recovered head must still survive the disposable copy.
+  git -C "$wt" checkout -q --detach HEAD
+  git -C "$wt" branch -q -D fm/captain
+  rc=0
+  reason=$(PATH="$fakebin:$PATH" accept_done ship no-mistakes "$wt" "$repo" "$line") || rc=$?
+  [ "$rc" -eq 1 ] || fail "a ready branch living only in the disposable copy was accepted"
+  assert_contains "$reason" "unreachable outside the worker copy" "the refusal did not name the unreachable head"
+
+  # The pre-validation handoff stays ungated, with no run to read at all.
+  PATH="$fakebin:$PATH" FM_TEST_NM_FAIL=1 accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete' \
+    || fail "the pre-validation handoff was gated as a ready report"
+  pass "publish=captain: the validated ready branch is refused until the pipeline's fixes are recovered onto it"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -400,5 +491,6 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_captain_published_ready_branch_requires_recovered_fixes
 
 echo "all fm-dod-lib tests passed"

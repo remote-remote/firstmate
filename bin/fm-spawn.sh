@@ -16,7 +16,10 @@
 #   captain's confirmed project fact rather than a per-task choice: a spawn
 #   refuses a brief whose `forge=` disagrees with the registered binding in
 #   either direction, and refuses --yolo on for a forge=gerrit project, where
-#   yolo is inactive (bin/fm-project-mode.sh's header carries that decision). A
+#   yolo is inactive (bin/fm-project-mode.sh's header carries that decision).
+#   The registered publisher is read the same way: on a publish=captain project
+#   a no-mistakes or direct-PR ship whose brief does not record publish=captain
+#   is refused, because the captain pushes and opens every PR there. A
 #   registry entry the parser refuses stops the spawn rather than launching on a
 #   guessed posture. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
@@ -3156,6 +3159,23 @@ if [ "$KIND" = ship ]; then
   # manufacture one.
   if [ "$STANDING_FORGE" = gerrit ] && [ "$YOLO" = on ]; then
     echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=gerrit, where yolo is inactive because a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); spawn with --yolo off" >&2
+    exit 1
+  fi
+  # On a publish=captain project the captain pushes and opens every PR, so a
+  # ship whose brief would let the worker or the pipeline publish is refused.
+  # local-only publishes nothing and stays available; a captain-published brief
+  # on any other project only publishes less, so it is not refused. The forge
+  # read above already refused a malformed publish token.
+  STANDING_PUBLISH=$("$FM_ROOT/bin/fm-project-mode.sh" --publish "$PROJ_NAME" 2>/dev/null) || STANDING_PUBLISH=
+  [ -n "$STANDING_PUBLISH" ] || STANDING_PUBLISH=fleet
+  BRIEF_PUBLISH=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]publish=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  [ -n "$BRIEF_PUBLISH" ] || BRIEF_PUBLISH=fleet
+  if [ "$STANDING_PUBLISH" = captain ] && [ "$MODE" != local-only ] && [ "$BRIEF_PUBLISH" != captain ]; then
+    if [ "$MODE" = no-mistakes ]; then
+      echo "error: publish mismatch for $ID: $PROJ_NAME is registered publish=captain, so the captain pushes and opens every PR, but $SOURCE_BRIEF records a worker-published delivery; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with fm-brief.sh $ID $PROJ_NAME --mode no-mistakes --publish captain, then re-fill those two subsections" >&2
+    else
+      echo "error: publish mismatch for $ID: $PROJ_NAME is registered publish=captain, so the captain pushes and opens every PR, and mode=$MODE would have the worker push; ship it no-mistakes with --publish captain, or local-only" >&2
+    fi
     exit 1
   fi
   # The registry holds the captain's standing posture, so dropping below it is

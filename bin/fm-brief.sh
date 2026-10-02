@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--publish <fleet|captain>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -72,9 +72,15 @@
 # membership pinned when its watch is armed, because the merge watch follows one
 # change.
 # It defaults to squash on gerrit and is refused without it.
+# --publish names who publishes the work, defaults to fleet, and mirrors the
+# registry's `publish=` token the same way --forge mirrors `forge=`: firstmate
+# reads it at intake and passes it here, and bin/fm-spawn.sh refuses a launch
+# that would let a worker publish on a publish=captain project.
+# `captain` composes only with --mode no-mistakes and no forge;
+# bin/fm-dod-lib.sh owns the review-pass contract it renders.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
-# on that forge. bin/fm-spawn.sh reads that line and refuses to launch a ship task
+# on that forge or " publish=captain" for a captain-published ship. bin/fm-spawn.sh reads that line and refuses to launch a ship task
 # whose explicit --mode or registered forge disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -82,7 +88,7 @@
 # infrastructure every lane shares - the no-mistakes daemon and the worktree pool
 # their own slot came from - so ship and scout cannot drift apart. A secondmate
 # charter omits it: that home allocates and returns slots for its own crewmates.
-# --mode, --forge, and --shape are refused on scout and secondmate scaffolds: a
+# --mode, --forge, --shape, and --publish are refused on scout and secondmate scaffolds: a
 # scout's deliverable is a report rather than a merge, and a charter is not a
 # delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -191,6 +197,8 @@ FORGE=none
 FORGE_SET=0
 SHAPE=
 SHAPE_SET=0
+PUBLISH=fleet
+PUBLISH_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -203,6 +211,7 @@ for a in "$@"; do
       branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
+      publish) PUBLISH=$a; PUBLISH_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -221,6 +230,8 @@ for a in "$@"; do
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     --shape) want_value=shape ;;
     --shape=*) SHAPE=${a#--shape=}; SHAPE_SET=1 ;;
+    --publish) want_value=publish ;;
+    --publish=*) PUBLISH=${a#--publish=}; PUBLISH_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -278,6 +289,12 @@ if [ "$KIND" = ship ]; then
   fi
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+if [ "$KIND" = ship ]; then
+  fm_publish_valid_for_mode "$PUBLISH" "$MODE" "$FORGE" "fm-brief.sh --publish" || exit 1
+elif [ "$PUBLISH_SET" -eq 1 ]; then
+  echo "error: --publish applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
 ID=${POS[0]}
@@ -640,8 +657,8 @@ case "$MODE" in
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
 esac
-RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
+RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$PUBLISH") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$PUBLISH") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -694,7 +711,9 @@ A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agen
 $DOD
 EOF
 append_brief_include
-if [ "$FORGE" = none ]; then
+if [ "$PUBLISH" = captain ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE publish=captain; replace {TASK} and {FIRSTMATE_SPEC})"
+elif [ "$FORGE" = none ]; then
   echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
 else
   echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {FIRSTMATE_SPEC})"

@@ -1431,6 +1431,56 @@ test_terminal_passed_with_override() {
   pass "terminal passed-with-override run reads done like a clean pass"
 }
 
+# A captain-published review pass skips push, so a passed run reads done while
+# its fix commits may still sit in the gate. The worker's validated-ready-branch
+# report is therefore held to its gate: blocked while the run holds the branch,
+# done from the report once custody is returned onto the shared local branch.
+run_review_pass_custody() {  # <branch> <next-action-code|>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: none
+outcome: passed-with-skips
+branch_sync:
+  state: ${3:-synchronized}
+  pipeline:
+    current_head: ${FM_FAKE_RUN_HEAD:-abc1234}
+EOF
+  [ -z "$2" ] || printf '  next_action:\n    code: %s\n    command: no-mistakes axi sync --recover\n' "$2"
+}
+
+test_captain_published_ready_branch_is_gated_beside_a_passed_run() {
+  reset_fakes
+  local d out
+  d=$(new_case captain-ready-branch)
+  make_repo_on_branch "$d/wt" fm/feat-cap
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cap.meta" "window=fm:fm-feat-cap" "worktree=$d/wt" "kind=ship" \
+    "mode=no-mistakes" "project=$d/wt"
+  printf 'done: implementation complete\ndone: validated ready in branch fm/feat-cap\n' > "$d/state/feat-cap.status"
+
+  FM_FAKE_AXI_STATUS="$(run_review_pass_custody fm/feat-cap recover_custody)"
+  out=$(run_crew_state "$d" feat-cap)
+  assert_contains "$out" "state: blocked" "a ready branch whose fixes the run still holds read done"
+  assert_contains "$out" "still holds this copy's branch" "the blocked reading did not name the unrecovered fixes"
+
+  FM_FAKE_AXI_STATUS="$(run_review_pass_custody fm/feat-cap '' custody_returned)"
+  out=$(run_crew_state "$d" feat-cap)
+  assert_contains "$out" "state: done" "a recovered ready branch was not read done"
+  assert_contains "$out" "validated ready in branch fm/feat-cap" "the done reading lost the worker's ready report"
+
+  # Without that report the passed run keeps its ordinary reading.
+  printf 'done: implementation complete\n' > "$d/state/feat-cap.status"
+  FM_FAKE_AXI_STATUS="$(run_review_pass_custody fm/feat-cap recover_custody)"
+  out=$(run_crew_state "$d" feat-cap)
+  assert_contains "$out" "state: done" "a passed run without the ready report changed its reading"
+  assert_contains "$out" "source: run-step" "a passed run without the ready report stopped answering from the run"
+  pass "a captain-published ready branch is held to its gate beside a passed run"
+}
+
 test_terminal_passed_with_skips() {
   reset_fakes
   local d; d=$(new_case passed-with-skips)
@@ -5546,6 +5596,7 @@ test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_passed_with_override
 test_terminal_passed_with_skips
+test_captain_published_ready_branch_is_gated_beside_a_passed_run
 test_terminal_passed_uses_matching_retirement_receipt_without_forge
 test_terminal_passed_no_forge_switch_skips_read_but_keeps_receipt
 test_terminal_passed_with_open_pr_does_not_claim_merged

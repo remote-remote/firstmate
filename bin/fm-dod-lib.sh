@@ -6,7 +6,7 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<publish>]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
 # contract.
@@ -59,6 +59,14 @@
 # changes is refused until it can be watched by its membership pinned when its
 # watch is armed, because the merge poll watches one change. No contract here
 # lets a worker submit, vote on, or abandon a change.
+# publish is fleet|captain and defaults to fleet; bin/fm-project-mode.sh's header
+# owns the registry binding. publish=captain composes only with no-mistakes on
+# forge none, and appends " publish=captain" to the contract line: the same
+# review pass and custody recovery as Gerrit, minus any publish step. The worker
+# pushes nothing, the pipeline skips push, pr, and ci, and the ready report is a
+# `pipeline changes` note then `done: validated ready in branch <branch>`, gated
+# like a local-only head plus fm_dod_nm_custody_returned. The captain pushes the
+# branch and opens the PR.
 # The two PR-based blocks require a non-draft pull request before the done
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
@@ -93,8 +101,9 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
-# It takes the same optional trailing forge argument, because the rule that keeps
-# a worker off a remote is exactly the rule that changes when the forge does.
+# It takes the same optional trailing forge and publish arguments, because the
+# rule that keeps a worker off a remote is exactly the rule that changes when the
+# forge or the publisher does.
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-pr-lib.sh"
@@ -140,10 +149,40 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   return 0
 }
 
-fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
-  local mode=$1 id=$2 forge=${4:-none}
+# Closed-set gate for who publishes a ship's work, shared like the forge gate
+# above. `captain` is the no-mistakes review pass that ends at a ready local
+# branch the captain pushes; it exists only on the forge whose pull requests the
+# captain opens, so it is refused with direct-PR and local-only, which have no
+# pipeline to run, and with a Gerrit forge, whose review pass already publishes.
+fm_publish_valid_for_mode() {  # <publish> <mode> <forge> <caller>
+  local publish=$1 mode=$2 forge=$3 caller=$4
+  case "$publish" in
+    fleet|captain) ;;
+    *)
+      echo "error: $caller: unknown publisher '$publish' (expected fleet or captain)" >&2
+      return 1 ;;
+  esac
+  [ "$publish" = captain ] || return 0
+  if [ "$mode" != no-mistakes ]; then
+    echo "error: $caller: publish=captain cannot ship mode=$mode - it is the no-mistakes review pass that ends at a ready local branch the captain pushes; ship no-mistakes" >&2
+    return 1
+  fi
+  if [ "$forge" != none ]; then
+    echo "error: $caller: publish=captain cannot ship forge=$forge - that forge's review pass already defines how its change is published" >&2
+    return 1
+  fi
+  return 0
+}
+
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<publish>]
+  local mode=$1 id=$2 forge=${4:-none} publish=${5:-fleet}
   local branch=${3:-fm/$id}
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
+  fm_publish_valid_for_mode "$publish" "$mode" "$forge" fm_ship_rule_one || return 1
+  if [ "$publish" = captain ]; then
+    printf '%s\n' "1. Never push to any remote, never open a PR, and never merge. Work only on your \`$branch\` branch: the captain pushes it and opens the PR."
+    return 0
+  fi
   if [ "$forge" = gerrit ]; then
     printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
     return 0
@@ -277,11 +316,12 @@ EOF
 
 # The forge-independent middle of the no-mistakes contract: how a worker drives
 # the pipeline, what `--intent` may carry, and the two firstmate-specific rules.
-# Written once; only the two sentences about a green PR depend on the forge,
-# because on gerrit the ci step is skipped and there is no PR to report.
-fm_nm_driving_block() {  # <forge>
+# Written once; only the two sentences about a green PR depend on the forge and
+# publisher, because on gerrit or publish=captain the ci step is skipped and
+# there is no PR to report.
+fm_nm_driving_block() {  # <forge> [<publish>]
   local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg
-  if [ "$1" != gerrit ]; then
+  if [ "$1" != gerrit ] && [ "${2:-fleet}" != captain ]; then
     pr_return_line="Only a drive call's return reports the green PR: \`no-mistakes axi status\` shows progress but never reports \`checks-passed\` while the ci step is still monitoring the PR for merge, so never wait on a status poll for the next gate or outcome.
 "
     pr_reattach_clause="; once checks are green it returns \`checks-passed\` immediately, and"
@@ -350,10 +390,66 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
-  local mode=$1 id=$2 forge=${4:-none}
+# The no-mistakes review pass shared by forge=gerrit and publish=captain: the
+# run skips its three forge-facing steps, so its fix commits stay in the gate
+# until the worker recovers custody. Only what the worker does next differs, so
+# the caller names it: <act> "publish", <act-it> "publish it", <acting>
+# "publishing", and <exposure> where the unfixed code would otherwise land.
+fm_nm_review_pass_skip_lines() {
+  cat <<'EOF'
+Pass `--skip push,pr,ci` on every `no-mistakes axi run` for this task, and skip nothing else: `review`, `test`, `document`, and `lint` are the whole point of the run.
+Those three are the only steps that reach a forge, and skipping them is a supported outcome, not a degraded one.
+EOF
+}
+
+fm_nm_review_pass_custody_block() {  # <branch> <act> <act-it> <acting> <exposure>
+  local branch=$1 act=$2 act_it=$3 acting=$4 exposure=$5
+  cat <<EOF
+Because \`push\` is skipped, the pipeline's fixes DO NOT arrive in your checkout: each fix round commits onto a branch inside no-mistakes' own local gate repository, and with no push nothing carries those commits back to you.
+Your tree never goes dirty and nothing interrupts you, so a passed run whose fixes are still in the gate looks exactly like a passed run whose fixes you already have.
+You may not $act until you have closed that gap:
+1. After the run reaches its outcome, read \`branch_sync.next_action\` from \`no-mistakes axi status\`.
+2. When its code is \`recover_custody\`, run the exact command that status prints - \`no-mistakes axi sync --recover\` - and confirm \`branch_sync.state\` comes back \`custody_returned\` on a clean tree. The printed command is authoritative if it differs. The \`run_pipeline\` next action status reports after recovery is not an instruction to run again: the recovered head is the one the passed run validated, so $act_it.
+3. Confirm with \`git log\` that \`$branch\` now carries every fix commit the run made, whether or not step 2 was needed.
+An unrecovered fix round is an unfinished task, never housekeeping: $acting without it is how the UNFIXED code reaches $exposure.
+Your ready report is refused while the run still holds your branch, while its outcome is missing or not passing, or while your HEAD's tree differs from the run's result.
+EOF
+}
+
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<publish>]
+  local mode=$1 id=$2 forge=${4:-none} publish=${5:-fleet}
   local branch=${3:-fm/$id}
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
+  fm_publish_valid_for_mode "$publish" "$mode" "$forge" fm_dod_block || return 1
+  if [ "$publish" = captain ]; then
+    cat <<EOF
+# Definition of done
+Delivery contract: mode=no-mistakes publish=captain
+Ship branch: $branch
+On this project the captain publishes, so **no-mistakes runs here as a review pass that ends at a ready local branch**: the captain pushes that branch and opens its PR.
+Nothing in this task pushes, opens a PR, or merges, neither from this copy nor through the pipeline.
+EOF
+    fm_nm_review_pass_skip_lines
+    cat <<EOF
+The task is complete only when committed on your branch.
+When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate.
+That first \`done:\` is the handoff that starts the pipeline; it is not a ready report.
+
+EOF
+    fm_nm_driving_block "$forge" "$publish"
+    printf '\n'
+    fm_nm_review_pass_custody_block "$branch" "report ready" "report it ready" "reporting ready" "the captain's push"
+    cat <<EOF
+
+When the run's outcome is passed, passed-with-skips, or passed-with-override and step 3 holds, the branch is ready.
+The captain opens the PR from this branch, so your report is how the pipeline's own fix commits reach the captain: first append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
+Then append \`done [at=<epoch>]: validated ready in branch $branch\` to the status file and stop. You are finished.
+That \`done:\` is accepted only when this copy's HEAD is on the shared local branch \`$branch\` and carries the run's result, so commit nothing after the run; if you must change the work, commit it and run /no-mistakes again before reporting ready.
+Do NOT push, do NOT open a PR, do NOT merge: the captain pushes the branch and opens the PR, then firstmate tracks that PR to merge under the configured merge authority.
+EOF
+    return 0
+  fi
   case "$mode:$forge" in
     direct-PR:gerrit)
       cat <<EOF
@@ -376,8 +472,9 @@ EOF
 Delivery contract: mode=no-mistakes forge=gerrit shape=squash
 Ship branch: $branch
 This project's review server is Gerrit: it has no pull requests and no forge CI the pipeline can watch, so **no-mistakes runs here as a review pass that ends at a ready branch**, and you then publish that branch as one change.
-Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
-Those three are the only steps that reach a forge, and skipping them is a supported outcome, not a degraded one.
+EOF
+      fm_nm_review_pass_skip_lines
+      cat <<EOF
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate.
@@ -385,16 +482,9 @@ That first \`done:\` is the handoff that starts the pipeline; it is not a reques
 
 EOF
       fm_nm_driving_block "$forge"
+      printf '\n'
+      fm_nm_review_pass_custody_block "$branch" publish "publish it" publishing review
       cat <<EOF
-
-Because \`push\` is skipped, the pipeline's fixes DO NOT arrive in your checkout: each fix round commits onto a branch inside no-mistakes' own local gate repository, and with no push nothing carries those commits back to you.
-Your tree never goes dirty and nothing interrupts you, so a passed run whose fixes are still in the gate looks exactly like a passed run whose fixes you already have.
-You may not publish until you have closed that gap:
-1. After the run reaches its outcome, read \`branch_sync.next_action\` from \`no-mistakes axi status\`.
-2. When its code is \`recover_custody\`, run the exact command that status prints - \`no-mistakes axi sync --recover\` - and confirm \`branch_sync.state\` comes back \`custody_returned\` on a clean tree. The printed command is authoritative if it differs. The \`run_pipeline\` next action status reports after recovery is not an instruction to run again: the recovered head is the one the passed run validated, so publish it.
-3. Confirm with \`git log\` that \`$branch\` now carries every fix commit the run made, whether or not step 2 was needed.
-An unrecovered fix round is an unfinished task, never housekeeping: publishing without it is how the UNFIXED code reaches review.
-Your ready report is refused while the run still holds your branch, while its outcome is missing or not passing, or while your HEAD's tree differs from the run's result.
 
 When the run's outcome is passed, passed-with-skips, or passed-with-override and step 3 holds, publish.
 The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; your report is how they reach the captain.
@@ -489,6 +579,15 @@ fm_dod_note_reports_published_change() {  # <note>
   return 1
 }
 
+# 0 when a done: note reports the publish=captain review pass's ready local
+# branch (`validated ready in branch <branch>`), which publishes nothing.
+fm_dod_note_reports_validated_branch() {  # <note>
+  case "$1" in
+    *"validated ready in branch"*) return 0 ;;
+  esac
+  return 1
+}
+
 # 0 when this ship done: is one the named-head gate must accept or refuse.
 # no-mistakes pre-validation done: is the pipeline handoff and is not gated.
 # Empty mode is treated as no-mistakes, the unregistered-project default.
@@ -500,7 +599,8 @@ fm_dod_should_gate_ship_done() {  # <kind> <mode> <line>
   case "$2" in
     direct-PR|local-only) return 0 ;;
     no-mistakes|'')
-      fm_dod_note_reports_ci_ready "$note" || fm_dod_note_reports_published_change "$note" ;;
+      fm_dod_note_reports_ci_ready "$note" || fm_dod_note_reports_published_change "$note" \
+        || fm_dod_note_reports_validated_branch "$note" ;;
     *) return 1 ;;
   esac
 }
@@ -579,10 +679,12 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
 # the run's outcome is passed, passed-with-skips or passed-with-override (the
 # passing set bin/fm-crew-state.sh reads), that pipeline owns no unreturned work (branch_sync.next_action.code is neither
 # recover_custody nor continue_active_run) and HEAD's tree equals the tree of the
-# pipeline's current head resolved in this copy. On a Gerrit project push is
-# skipped, so a fix round's commits stay in the gate until custody is recovered,
-# and a copy that publishes before recovering has a server patch set that agrees
-# with its own unfixed HEAD - the published-tree check alone accepts it. Trees
+# pipeline's current head resolved in this copy. On a Gerrit project, and on a
+# publish=captain review pass, push is skipped, so a fix round's commits stay in
+# the gate until custody is recovered. A Gerrit copy that publishes before
+# recovering has a server patch set that agrees with its own unfixed HEAD - the
+# published-tree check alone accepts it - and a captain-published copy would
+# hand the captain its unfixed branch. Trees
 # are compared rather than ancestry because the publish stamps a Change-Id and
 # rewrites the branch's messages. An unreadable status refuses, as an unreadable
 # change does. 1 when refused; stdout then holds a one-line reason.
@@ -596,13 +698,13 @@ fm_dod_nm_custody_returned() {  # <worktree>
   case "$outcome" in
     passed|passed-with-skips|passed-with-override) ;;
     *)
-      printf '%s\n' "the no-mistakes run for this copy has outcome ${outcome:-(none)}, not a pass, so the published work is not validated"
+      printf '%s\n' "the no-mistakes run for this copy has outcome ${outcome:-(none)}, not a pass, so the reported work is not validated"
       return 1 ;;
   esac
   code=$(fm_nm_branch_sync_nested "$out" next_action code)
   case "$code" in
     recover_custody|continue_active_run)
-      printf '%s\n' "the no-mistakes run still holds this copy's branch (next action $code), so its fixes are not recovered into the published work"
+      printf '%s\n' "the no-mistakes run still holds this copy's branch (next action $code), so its fixes are not recovered into the reported work"
       return 1 ;;
   esac
   pipeline_head=$(fm_nm_branch_sync_nested "$out" pipeline current_head)
@@ -613,26 +715,30 @@ fm_dod_nm_custody_returned() {  # <worktree>
     pipeline_tree=$(git -C "$wt" rev-parse --verify --quiet "$pipeline_head^{tree}" 2>/dev/null) || pipeline_tree=
   fi
   if [ -z "$head_tree" ] || [ -z "$pipeline_tree" ] || [ "$head_tree" != "$pipeline_tree" ]; then
-    printf '%s\n' "this copy's HEAD does not carry the no-mistakes run's result ${pipeline_head:-(unknown head)}, so the pipeline's fixes are not in the published work"
+    printf '%s\n' "this copy's HEAD does not carry the no-mistakes run's result ${pipeline_head:-(unknown head)}, so the pipeline's fixes are not in the reported work"
     return 1
   fi
   return 0
 }
 
 # 0 when <sha> is reachable from a ref that survives the disposable worktree:
-# any remote-tracking ref, or - for local-only - heads in the project clone.
-fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
-  local wt=$1 project=$2 mode=$3 sha=$4
+# any remote-tracking ref, or - for a delivery that stops at a local branch
+# (<local-heads> 1) - heads in the project clone.
+fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <local-heads> <sha>
+  local wt=$1 project=$2 local_heads=$3 sha=$4
   fm_dod_ref_contains "$wt" refs/remotes "$sha" && return 0
   fm_dod_ref_contains "$project" refs/remotes "$sha" && return 0
-  [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
+  [ "$local_heads" = 1 ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
 # PR whose head the forge holds, when it names a Gerrit change whose current
 # patch set carries the worker copy's HEAD tree, or otherwise when its named
 # head - the worker copy's HEAD - is reachable outside that disposable copy. A
-# published-for-review report that names no Gerrit change is refused.
+# published-for-review report that names no Gerrit change is refused. A
+# no-mistakes `validated ready in branch` report publishes nothing, so it is
+# accepted only when fm_dod_nm_custody_returned holds and that head is on the
+# project's shared local branch, as a local-only head is.
 # There is no free-text SHA scan: a SHA that happens to appear in the note is
 # not the named head. 1 when
 # the claim is refused; stdout then holds a one-line reason and no other
@@ -640,7 +746,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit local_heads=0
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
@@ -675,7 +781,15 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
     return 1
   fi
-  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+  [ "$mode" = local-only ] && local_heads=1
+  case "$mode" in
+    no-mistakes|'')
+      if fm_dod_note_reports_validated_branch "$(status_line_note "$line")"; then
+        fm_dod_nm_custody_returned "$wt" || return 1
+        local_heads=1
+      fi ;;
+  esac
+  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$local_heads" "$sha"; then
     return 0
   fi
   printf '%s\n' "named head $sha is unreachable outside the worker copy"

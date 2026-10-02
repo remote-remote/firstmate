@@ -34,7 +34,9 @@
 # because that script has no registry access at all, and bin/fm-spawn.sh checks
 # its value against the registry; bin/fm-project-mode.sh's header owns the
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
-# the refusal of a forge on local-only.
+# the refusal of a forge on local-only. The registered publisher is read the same
+# way: a publish=captain project promotes no-mistakes as the captain-published
+# review pass and refuses direct-PR.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
 set -eu
 
@@ -67,6 +69,7 @@ BRANCH_PREFIX=fm/
 MODE_SET=0
 YOLO_SET=0
 FORGE=none
+PUBLISH=fleet
 POS=()
 want_value=
 for a in "$@"; do
@@ -194,10 +197,22 @@ if [ -n "$PROMOTE_PROJECT" ]; then
   fi
   FORGE=${PROMOTE_STANDING_FORGE:-none}
   refuse_impossible_forge_posture || exit 1
+  # The registered publisher is the captain's standing word on who pushes, so a
+  # publish=captain project ships no-mistakes as the captain-published review
+  # pass, keeps local-only (which pushes nothing), and refuses direct-PR.
+  if [ "$("$FM_ROOT/bin/fm-project-mode.sh" --publish "$PROMOTE_PROJECT_NAME" 2>/dev/null)" = captain ]; then
+    case "$MODE" in
+      no-mistakes) PUBLISH=captain ;;
+      direct-PR)
+        echo "error: $ID cannot promote to mode=direct-PR: $PROMOTE_PROJECT_NAME is registered publish=captain, so the captain pushes and opens every PR; promote no-mistakes or local-only" >&2
+        exit 1 ;;
+    esac
+  fi
 fi
 # An unbound project keeps the exact wording it always had.
 PROMOTE_FORGE_WORDS=
 [ "$FORGE" = none ] || PROMOTE_FORGE_WORDS=" forge=$FORGE"
+[ "$PUBLISH" = fleet ] || PROMOTE_FORGE_WORDS="$PROMOTE_FORGE_WORDS publish=$PUBLISH"
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
@@ -254,13 +269,13 @@ The mode-specific Definition of done below is the current delivery contract.
 
 # Current ship safety rule
 EOF
-  fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE"
+  fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$PUBLISH"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE"
+  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$PUBLISH"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }

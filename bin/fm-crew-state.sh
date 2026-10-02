@@ -12,6 +12,8 @@
 # the pane busy-signature) and reconciles the possibly-stale log against it.
 # A ship `done:` is current-state done only when bin/fm-dod-lib.sh accepts the
 # named head as reachable outside the worker's disposable copy; otherwise blocked.
+# That includes a publish=captain `validated ready in branch` report read beside
+# a passed run, which the run alone would otherwise report done.
 #
 # The determinism lives entirely here - run-step / pane / log reads, fixed
 # mapping logic, and terminal passed-run PR detail from bounded evidence only,
@@ -1222,6 +1224,13 @@ if [ "$HAVE_RUN" = 1 ]; then
   esac
 
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
+  # A publish=captain ready report names a local branch, and a passed run still
+  # reads done while its fixes sit unrecovered in the gate, so that report is
+  # held to its gate (bin/fm-dod-lib.sh) rather than to the run alone.
+  if [ "$RUN_STATE" = "done" ] && [ "$LOG_VERB" = "done" ] \
+    && fm_dod_note_reports_validated_branch "$(status_line_note "$LOG_LINE")"; then
+    emit_ship_status_done "$RUN_DETAIL"
+  fi
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
