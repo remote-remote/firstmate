@@ -26,7 +26,8 @@ Everything below layers on firstmate's normal lifecycle in `AGENTS.md`; that con
    > - After the isolation check and branch step, orient cheaply: read <the files the ask names or clearly implies>, and nothing broader.
    > - Print a summary of at most eight lines in the pane: the relevant code paths, where the change goes, and what test would pin it. Append `paused [at=<epoch>]: oriented, waiting for the captain to work hands-on in this pane` to the status file and stop.
    > - From then on, take direction from the captain's input in the pane; it is authoritative. Make only the changes the captain asks for.
-   > - When the captain says the work is done, make sure it is committed on your branch with a regression test where behaviour changed, then follow the Definition of done.
+   > - Never commit, amend, or reset unless the captain asks you to. Leave your changes uncommitted, because the captain reviews them as working-tree changes.
+   > - When the captain says the work is done, check that it is committed on your branch with a regression test where behaviour changed. If anything is still uncommitted, ask the captain to commit it or to tell you to, and wait. Then follow the Definition of done.
 
    Spawn at `--effort low` unless the captain says otherwise, because the captain supplies the reasoning.
 3. **Spawn, then open the captain's session.**
