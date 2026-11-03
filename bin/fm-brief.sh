@@ -748,6 +748,9 @@ $WAIT_BLOCK$INBOX_SECTION
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+If you build a working version of a fix, give the report a \`## Seam\` section so later work can trust it instead of re-proving it.
+Save the exact change as a patch at \`$DATA/$ID/seam.patch\` and name the base commit it applies to.
+State how you exercised it (commands, data generator, sizes), the effects you measured, and what you did not verify or exercise.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.
