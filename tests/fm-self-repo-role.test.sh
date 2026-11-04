@@ -503,7 +503,7 @@ test_dod_block_renders_and_bounds_consent() {
   assert_not_contains "$out" "upstream-consent" "a contract without consent must not render the token"
   out=$(fm_dod_block local-only local-id fm/local-id none '' github.com/a/b 2>&1); rc=$?
   expect_code 1 "$rc" "local-only must refuse a consent token it can never spend"
-  out=$(fm_dod_block no-mistakes captain-id fm/captain-id none '' github.com/a/b captain 2>&1); rc=$?
+  out=$(fm_dod_block no-mistakes captain-id fm/captain-id none '' github.com/a/b auto captain 2>&1); rc=$?
   expect_code 1 "$rc" "a publish=captain review pass must refuse a consent token it can never spend"
   assert_contains "$out" "publish=captain" "the publish=captain consent refusal must name the publisher"
   pass "fm_dod_block: upstream consent renders on publishing contracts and is refused where nothing publishes"
